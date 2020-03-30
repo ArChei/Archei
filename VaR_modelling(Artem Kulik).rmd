@@ -1,0 +1,209 @@
+---
+title: "Project"
+author: "Artem Kulik"
+date: "03/30/2020"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+# Libraries
+```{r setup, include=TRUE, warning = FALSE, message=FALSE}
+library(datasets)
+library(evd)
+library( QuantTools ) # Market data loading
+library( data.table ) # Library for data management
+library( ghyp )       # GHP
+library( copula )     # Copula
+library( fGarch )     # GARCH   
+library( evd )        # Extreme Value
+library(Hmisc)
+library(corrplot)
+library(pastecs)
+library(plotrix)
+
+```
+
+##Data downloading
+```{r, include=TRUE, warning = FALSE, message=FALSE}
+#stock_FORD = get_yahoo_data( "F", from = "2016-01-01", to = "2020-01-01" )
+#stock_GAZPROM = get_yahoo_data( "OGZPY" , from = "2016-01-01", to = "2020-01-01" )
+#stock_UBS = get_yahoo_data( "UBS" , from = "2016-01-01", to = "2020-01-01" )
+stock_FORD = read.csv(file = 'D:/Work/F.csv')
+stock_GAZPROM = read.csv(file = 'D:/Work/OGZPY.csv')
+stock_UBS = read.csv(file = 'D:/Work/UBS.csv')
+describe(stock_FORD)
+```
+```{r}
+# returns computing
+stock_FORD$return_FORD = stock_FORD$Close / shift(stock_FORD$Close, fill = stock_FORD$Close[1]) - 1
+stock_GAZPROM$return_GAZPROM = stock_GAZPROM$Close / shift(stock_GAZPROM$Close, fill = stock_GAZPROM$Close[1]) - 1
+stock_UBS$return_UBS = stock_UBS$Close / shift(stock_UBS$Close, fill = stock_UBS$Close[1]) - 1
+#stock_FORD = stock_FORD[, .( Date, return_FORD = close / shift( close, fill = close[1] ) - 1 )]
+#stock_GAZPROM = stock_GAZPROM[, .( date, return_GAZPROM = close / shift( close, fill = close[1] ) - 1 )]
+#stock_UBS = stock_UBS[, .( date, return_UBS = close / shift( close, fill = close[1] ) - 1 )]
+#merging data
+portfolio = merge( stock_UBS, merge( stock_FORD, stock_GAZPROM, by = "Date" ), by = "Date" )
+head(portfolio)
+portfolio <- data.frame(portfolio)
+typeof(portfolio)
+data = as.vector( portfolio[c(8, 15, 22)] )
+stat.desc(stock_FORD)
+```
+
+```{r}
+C<-cor(stock_FORD[-1])
+corrplot(C, method="square")
+corrplot.mixed(C,lower = "number",upper="square" )
+
+```
+
+```{r}
+plot(portfolio$Date, cumprod(1+portfolio$return_FORD), "F", type = "l", lwd = 4, col = "black", xlab="Date", ylab="Return")
+lines(portfolio$Date, cumprod(1+portfolio$return_FORD), "F", type = "l", lwd = 4, col = "black")
+lines(portfolio$Date, cumprod(1+portfolio$return_UBS), "UBS", type = "l", lwd = 4, col = "cyan")
+legend("topright", legend=c("Ford", "UBS"),
+       col=c("black", "cyan"), lty=1:2, cex=0.8)
+plot(portfolio$Date, cumprod(1+portfolio$return_GAZPROM), "GAZPROM", type = "l", lwd = 4, col = "red", xlab="Date", ylab="Return")
+lines(portfolio$Date, cumprod(1+portfolio$return_GAZPROM), "GAZPROM", type = "l", lwd = 4, col = "red")
+legend("topleft", legend="Gazprom",
+       col="red", lty=1:2, cex=0.8)
+```
+
+
+```{r}
+par(mfrow=c(3,2))
+hist(stock_FORD$Open,col='gray')
+hist(stock_FORD$High,col='green')
+hist(stock_FORD$Close,col='magenta')
+hist(stock_FORD$Low,col='red')
+hist(stock_FORD$Volume,col='yellow')
+hist(stock_FORD$return_FORD,col='blue')
+portfolio
+
+```
+#Finding best model via Acaic criterion for Ford Motor (finally it's student's distribution)
+```{r, include=TRUE, warning = FALSE, message=FALSE}
+N <- 10^6
+alpha <- 0.05 
+df_stock_FORD <- portfolio[c(1,15)]
+#df_stock_FORD <- portfolio[, .( date, return_FORD )]
+return_FORD <- df_stock_FORD$return_FORD
+df_stock_FORD
+aic.uv <- stepAIC.ghyp( return_FORD, dist=c("gauss","t","ghyp"), symmetric=NULL, silent=TRUE )
+summary( aic.uv$best.model )  
+#Monte Carlo method
+#distribution generilisation and sorting
+return_FORD.sim <- rghyp( n=N, object=aic.uv$best.model )
+return_FORD.sim <- sort( return_FORD.sim )
+#quantile and probability mass
+ES <- mean( return_FORD.sim[1:(alpha*N-1)] )
+VaR <- return_FORD.sim[alpha*N]      
+sprintf("VaR = %f", VaR)
+sprintf("ES = %f", ES)
+```
+
+
+
+#Var curve bulding
+```{r, include=TRUE, warning = FALSE, message=FALSE, results='hide'}
+T <- length(return_FORD) #sample length
+T_train <- 0.8 * T; #train length
+T_test <- T - T_train #test length
+VaR <- numeric() #Var list for plotting
+h <-260  #horizon
+for ( i in (T_train + 1):(T_train + T_test) ) {
+  h.return_FORD <- return_FORD[(i-h):(i-1)]
+  return_FORD.fit <- stepAIC.ghyp(h.return_FORD, dist=c("gauss","t","ghyp"), symmetric=NULL, silent=TRUE)
+  VaR[i-T_train] <- qghyp(alpha, object=return_FORD.fit$best.model)
+}
+fact <- return_FORD[(T_train+1):T]
+plot( fact, type="l" )
+lines( VaR, col="red" )
+```
+
+
+# Checking VaR quaility (it can be seen that p.value is not big)
+```{r, include=TRUE, warning=FALSE, message=FALSE, error=TRUE}
+kupic_test <- function( fact, VaR, T_test, alpha ) {
+#counting how many times breaking throuth happens (below VaR level)
+  K <- sum( fact[0:T_test] < VaR )                                 
+  alpha0 <- K / T_test                                                                          
+  S <- -2*log((1 - alpha)^(T_test - K)*alpha^K) + 2*log((1 - alpha0)^(T_test - K) * alpha0^K)
+  p.value <- 1 - pchisq( S, df=1 )
+  sprintf( "p.value = %f", p.value )
+}
+kupic_test( fact, VaR, T_test, alpha )
+```
+
+#ARMA-Garch model simulationg (it is noticed that p.value is better than before)
+```{r, include=TRUE, warning=FALSE, message=FALSE}
+return_FORD.gfit <- garchFit( formula=~arma(1,1) + aparch(1,1), data=return_FORD, delta=2, include.delta=FALSE, leverage=TRUE, cond.dist="sged", shape=1.25, include.shape=FALSE, trace=FALSE )
+return_FORD.frc <- predict( return_FORD.gfit, n.ahead=5 )
+alpha <- 0.05
+VaR <- return_FORD.frc[1, 1]+return_FORD.frc[1, 3] * qsged( alpha, mean=0, sd=1, nu=1.5, xi=return_FORD.gfit@fit$par["skew"] )
+sprintf("VaR : %f", VaR)
+#plotting VaR curve and checking its quality
+VaR <- c()
+for ( i in (T_train + 1):T ) {
+  h.return_FORD <- return_FORD[(i-h):(i-1)]
+  return_FORD.gfit <- garchFit( formula=~arma(1,1) + aparch(1,1), data=h.return_FORD, delta=2, include.delta=FALSE, leverage=TRUE, cond.dist="sged", shape=1.5, include.shape=FALSE, trace=FALSE )
+  return_FORD.frc <- predict( return_FORD.gfit, n.ahead=1 )
+  VaR[i-T_train] <- return_FORD.frc[1,1] + return_FORD.frc[1,3] * qsged( alpha, mean=0, sd=1, nu=1.5, xi=return_FORD.gfit@fit$par["skew"] )
+}
+fact <- return_FORD[T_train+1:T]
+plot( fact, xlim=c(0, 200), type="l" )
+lines( VaR, col="red" )
+kupic_test( fact, VaR, T_test, alpha )
+```
+### General Paretto distribution (p.value is not the best)
+```{r, include=TRUE, warning=FALSE, message=FALSE, results='hide'}
+h <- 260
+alpha <- 0.05
+VaR <- c()
+ES <- c()
+T  <- length(return_FORD) #sample length
+T_train <- as.integer(0.8 * length(return_FORD)) #train length
+T_test <- T - T_train #test length
+u <- sort(return_FORD)[0.05*T]
+#VaR curve
+for (i in (T_train + 1):T) {
+  h.return_FORD <- return_FORD[(i-h):(i-1)]
+  u <- sort( h.return_FORD )[as.integer( 0.05 * h )]
+  gpd.fit <- fpot( h.return_FORD, threshold=u, model="gpd", method="SANN" )
+  beta <- gpd.fit$estimate[1]
+  xi <- gpd.fit$estimate[2]
+  Fu <- gpd.fit$pat
+  VaR[i-T_train] <- u + beta / xi*(((1-alpha)/Fu)^(-xi)-1)
+}
+#plot
+fact <-return_FORD[T_train+1:T]
+plot( fact,xlim=c(0, 200), type="l" )
+lines( VaR, col="red" )
+kupic_test( fact, VaR, T_test, alpha )
+```
+
+
+#generalized hyperbolic distribution (p.value is somewhere near the last meaning)
+```{r, include=TRUE, warning=FALSE, message=FALSE, results='hide'}
+h <- 260 #horizon
+VaR <- c()
+T <- length(return_FORD) #Sample length
+T_train <- as.integer(0.8 * length(return_FORD)) # train length
+T_test <- T - T_train                      # test length
+for (i in (T_train + 1):T) {
+  h.return_FORD <- return_FORD[(i-h):(i-1)]
+  return_FORD.ghyp <- fit.ghypuv(h.return_FORD,symmetric=FALSE,silent=TRUE)
+  VaR[i-T_train] <- qghyp(p=alpha, object=return_FORD.ghyp)
+}
+#Kupic Test and plotting
+fact <-return_FORD[T_train+1:T]
+plot(fact,xlim=c(0, 200), type="l")
+lines(VaR,col="red")
+kupic_test(fact, VaR, T_test, alpha)
+```
+
+
+Finally gev described Ford model the best way!!!
+
